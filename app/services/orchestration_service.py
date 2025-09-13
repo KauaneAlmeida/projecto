@@ -1,28 +1,29 @@
 """
-Hybrid Flow Orchestration Service
+Intelligent Conversation Orchestration Service
 
-This service orchestrates between Firebase predefined flows and AI-powered responses.
-It determines whether to use a Firebase flow response or fallback to LangChain + Gemini.
+This service manages intelligent conversation flow using AI (LangChain + Gemini)
+instead of rigid Firebase flows. It handles context, memory, and natural dialogue.
 """
 
 import logging
-from typing import Dict, Any, Optional, Tuple
-from app.services.firebase_service import get_conversation_flow, get_user_session, save_user_session
+from typing import Dict, Any, Optional
+from datetime import datetime
+from app.services.firebase_service import get_user_session, save_user_session, save_lead_data
 from app.services.ai_chain import ai_orchestrator
-from app.services.conversation_service import conversation_manager
+from app.services.baileys_service import baileys_service
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-class HybridOrchestrator:
+
+class IntelligentOrchestrator:
     """
-    Hybrid orchestrator that manages the flow between Firebase predefined flows
-    and AI-powered responses using LangChain + Gemini.
+    Intelligent orchestrator that uses AI to manage conversation flow
+    instead of rigid predefined steps.
     """
     
     def __init__(self):
-        self.flow_cache = None
-        self.cache_timestamp = None
+        self.lead_fields = ["name", "area_of_law", "situation", "consent"]
     
     async def process_message(
         self, 
@@ -32,7 +33,7 @@ class HybridOrchestrator:
         platform: str = "web"
     ) -> Dict[str, Any]:
         """
-        Process incoming message with hybrid orchestration.
+        Process incoming message with intelligent AI orchestration.
         
         Args:
             message (str): User's message
@@ -41,37 +42,54 @@ class HybridOrchestrator:
             platform (str): Platform origin ("web", "whatsapp")
             
         Returns:
-            Dict[str, Any]: Response with type indicator and content
+            Dict[str, Any]: AI response with context
         """
         try:
-            logger.info(f"🎯 Processing message via hybrid orchestration - Session: {session_id}, Platform: {platform}")
+            logger.info(f"🎯 Processing message via AI orchestration - Session: {session_id}, Platform: {platform}")
             
-            # First, check if we're in a Firebase flow
-            flow_response = await self._check_firebase_flow(message, session_id, phone_number)
+            # Get or create session
+            session_data = await self._get_or_create_session(session_id, platform, phone_number)
             
-            if flow_response:
-                logger.info(f"📋 Using Firebase flow response for session: {session_id}")
-                return {
-                    "response_type": "firebase_flow",
-                    "platform": platform,
-                    "session_id": session_id,
-                    **flow_response
-                }
+            # Extract any lead information from the message
+            extracted_info = self._extract_lead_info(message, session_data)
+            if extracted_info:
+                session_data["lead_data"].update(extracted_info)
+                await save_user_session(session_id, session_data)
+                logger.info(f"📝 Updated lead data: {extracted_info}")
             
-            # If no Firebase flow match, use AI
-            logger.info(f"🤖 Using AI response for session: {session_id}")
-            ai_response = await self._get_ai_response(message, session_id, platform)
+            # Prepare context for AI
+            context = self._prepare_ai_context(session_data, platform)
+            
+            # Generate AI response
+            ai_response = await ai_orchestrator.generate_response(
+                message, 
+                session_id, 
+                context=context
+            )
+            
+            # Check if we have enough information to save as lead
+            if self._should_save_lead(session_data):
+                await self._save_lead_if_ready(session_data)
+            
+            # Update session with last interaction
+            session_data["last_message"] = message
+            session_data["last_response"] = ai_response
+            session_data["last_updated"] = datetime.now()
+            session_data["message_count"] = session_data.get("message_count", 0) + 1
+            await save_user_session(session_id, session_data)
             
             return {
-                "response_type": "ai_generated",
+                "response_type": "ai_intelligent",
                 "platform": platform,
                 "session_id": session_id,
                 "response": ai_response,
-                "ai_mode": True
+                "ai_mode": True,
+                "lead_data": session_data.get("lead_data", {}),
+                "message_count": session_data.get("message_count", 1)
             }
             
         except Exception as e:
-            logger.error(f"❌ Error in hybrid orchestration: {str(e)}")
+            logger.error(f"❌ Error in intelligent orchestration: {str(e)}")
             return {
                 "response_type": "error",
                 "platform": platform,
@@ -80,177 +98,224 @@ class HybridOrchestrator:
                 "error": str(e)
             }
     
-    async def _check_firebase_flow(
+    async def _get_or_create_session(
         self, 
-        message: str, 
         session_id: str, 
+        platform: str, 
         phone_number: Optional[str] = None
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Check if message should be handled by Firebase flow.
+    ) -> Dict[str, Any]:
+        """Get existing session or create new one."""
+        session_data = await get_user_session(session_id)
         
-        Args:
-            message (str): User's message
-            session_id (str): Session identifier
-            phone_number (Optional[str]): User's phone number
-            
-        Returns:
-            Optional[Dict[str, Any]]: Firebase flow response or None
-        """
-        try:
-            # Get current session state
-            session_data = await get_user_session(session_id)
-            
-            # If no session exists, start new conversation flow
-            if not session_data:
-                logger.info(f"🆕 No session found, starting new Firebase flow for: {session_id}")
-                return await conversation_manager.start_conversation(session_id)
-            
-            # If session exists but flow is not completed, continue with flow
-            if not session_data.get("flow_completed", False):
-                logger.info(f"📝 Continuing Firebase flow for session: {session_id}")
-                return await conversation_manager.process_response(session_id, message)
-            
-            # If flow is completed but phone not collected, handle phone collection
-            if session_data.get("flow_completed", False) and not session_data.get("phone_collected", False):
-                logger.info(f"📱 Handling phone collection for session: {session_id}")
-                return await conversation_manager.process_response(session_id, message)
-            
-            # If everything is completed, return None to use AI
-            logger.info(f"✅ Firebase flow completed for session {session_id}, switching to AI mode")
-            return None
-            
-        except Exception as e:
-            logger.error(f"❌ Error checking Firebase flow: {str(e)}")
-            return None
-    
-    async def _get_ai_response(self, message: str, session_id: str, platform: str) -> str:
-        """
-        Get AI response using LangChain + Gemini.
-        
-        Args:
-            message (str): User's message
-            session_id (str): Session identifier
-            platform (str): Platform origin
-            
-        Returns:
-            str: AI-generated response
-        """
-        try:
-            # Add platform context to the message for better AI understanding
-            contextual_message = message
-            if platform == "whatsapp":
-                contextual_message = f"[WhatsApp] {message}"
-            elif platform == "web":
-                contextual_message = f"[Website] {message}"
-            
-            # Generate AI response
-            ai_response = await ai_orchestrator.generate_response(contextual_message, session_id)
-            
-            # Update session to indicate AI mode
-            session_data = await get_user_session(session_id) or {}
-            session_data.update({
-                "ai_mode": True,
-                "flow_completed": True,
-                "phone_collected": True,  # Assume collected if in AI mode
+        if not session_data:
+            session_data = {
+                "session_id": session_id,
                 "platform": platform,
-                "last_ai_interaction": message
-            })
+                "phone_number": phone_number,
+                "created_at": datetime.now(),
+                "last_updated": datetime.now(),
+                "lead_data": {},
+                "message_count": 0,
+                "lead_saved": False
+            }
             await save_user_session(session_id, session_data)
+            logger.info(f"🆕 Created new session: {session_id}")
+        
+        return session_data
+    
+    def _extract_lead_info(self, message: str, session_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Extract lead information from user message using simple heuristics.
+        This could be enhanced with NLP in the future.
+        """
+        extracted = {}
+        message_lower = message.lower()
+        current_lead_data = session_data.get("lead_data", {})
+        
+        # Extract name (if not already collected)
+        if not current_lead_data.get("name"):
+            # Look for patterns that might indicate a name
+            words = message.split()
+            if len(words) >= 2 and not any(word in message_lower for word in [
+                "direito", "advogado", "processo", "problema", "situação", "preciso", "quero"
+            ]):
+                # Might be a name if it's 2+ words and doesn't contain legal terms
+                if all(word.isalpha() or word.replace(".", "").isalpha() for word in words[:2]):
+                    extracted["name"] = " ".join(words[:2]).title()
+        
+        # Extract area of law
+        legal_areas = {
+            "penal": "Direito Penal",
+            "criminal": "Direito Penal", 
+            "civil": "Direito Civil",
+            "trabalhista": "Direito Trabalhista",
+            "trabalho": "Direito Trabalhista",
+            "família": "Direito de Família",
+            "divórcio": "Direito de Família",
+            "empresarial": "Direito Empresarial",
+            "empresa": "Direito Empresarial"
+        }
+        
+        if not current_lead_data.get("area_of_law"):
+            for keyword, area in legal_areas.items():
+                if keyword in message_lower:
+                    extracted["area_of_law"] = area
+                    break
+        
+        # Extract situation (if message is descriptive)
+        if not current_lead_data.get("situation") and len(message) > 20:
+            situation_indicators = [
+                "problema", "situação", "preciso", "aconteceu", "estou", 
+                "tenho", "sofri", "fui", "recebi", "processo"
+            ]
+            if any(indicator in message_lower for indicator in situation_indicators):
+                extracted["situation"] = message[:200]  # Limit to 200 chars
+        
+        # Extract consent (if user agrees to something)
+        consent_indicators = [
+            "sim", "quero", "aceito", "concordo", "pode", "ok", "claro", 
+            "sim por favor", "pode ser", "tudo bem"
+        ]
+        if not current_lead_data.get("consent"):
+            if any(indicator in message_lower for indicator in consent_indicators):
+                extracted["consent"] = True
+        
+        return extracted
+    
+    def _prepare_ai_context(self, session_data: Dict[str, Any], platform: str) -> Dict[str, Any]:
+        """Prepare context information for AI."""
+        lead_data = session_data.get("lead_data", {})
+        
+        context = {
+            "platform": platform,
+            "message_count": session_data.get("message_count", 0),
+            "session_age_minutes": (
+                (datetime.now() - session_data.get("created_at", datetime.now())).seconds // 60
+            )
+        }
+        
+        # Add lead data to context
+        if lead_data.get("name"):
+            context["name"] = lead_data["name"]
+        if lead_data.get("area_of_law"):
+            context["area_of_law"] = lead_data["area_of_law"]
+        if lead_data.get("situation"):
+            context["situation"] = lead_data["situation"][:100]  # Truncate for context
+        
+        return context
+    
+    def _should_save_lead(self, session_data: Dict[str, Any]) -> bool:
+        """Check if we have enough information to save as a lead."""
+        lead_data = session_data.get("lead_data", {})
+        
+        # Save if we have at least name and one other piece of info
+        has_name = bool(lead_data.get("name"))
+        has_other_info = any([
+            lead_data.get("area_of_law"),
+            lead_data.get("situation"),
+            lead_data.get("consent")
+        ])
+        
+        return has_name and has_other_info and not session_data.get("lead_saved", False)
+    
+    async def _save_lead_if_ready(self, session_data: Dict[str, Any]):
+        """Save lead data if we have enough information."""
+        try:
+            lead_data = session_data.get("lead_data", {})
             
-            return ai_response
+            # Prepare lead data for saving
+            lead_record = {
+                "name": lead_data.get("name", "Unknown"),
+                "area_of_law": lead_data.get("area_of_law", "Not specified"),
+                "situation": lead_data.get("situation", "Not provided"),
+                "consent": lead_data.get("consent", False),
+                "phone_number": session_data.get("phone_number", ""),
+                "platform": session_data.get("platform", "unknown"),
+                "session_id": session_data["session_id"],
+                "message_count": session_data.get("message_count", 0),
+                "created_at": session_data.get("created_at", datetime.now()),
+                "status": "ai_collected"
+            }
+            
+            # Save to Firebase
+            lead_id = await save_lead_data(lead_record)
+            
+            # Update session
+            session_data["lead_saved"] = True
+            session_data["lead_id"] = lead_id
+            await save_user_session(session_data["session_id"], session_data)
+            
+            logger.info(f"💾 Saved lead data: {lead_id} for session {session_data['session_id']}")
             
         except Exception as e:
-            logger.error(f"❌ Error getting AI response: {str(e)}")
-            return "Desculpe, estou enfrentando dificuldades técnicas. Nossa equipe entrará em contato em breve para ajudá-lo."
+            logger.error(f"❌ Error saving lead data: {str(e)}")
     
     async def handle_phone_number_submission(
         self, 
         phone_number: str, 
         session_id: str
     ) -> Dict[str, Any]:
-        """
-        Handle phone number submission from web platform.
-        
-        Args:
-            phone_number (str): User's phone number
-            session_id (str): Session identifier
-            
-        Returns:
-            Dict[str, Any]: Response with WhatsApp trigger status
-        """
+        """Handle phone number submission and trigger WhatsApp."""
         try:
-            logger.info(f"📱 Handling phone number submission: {phone_number} for session: {session_id}")
+            logger.info(f"📱 Handling phone submission: {phone_number} for session: {session_id}")
             
-            # Get current session data
+            # Get session data
             session_data = await get_user_session(session_id) or {}
             
-            # Save phone number to session
-            session_data.update({
-                "phone_number": phone_number,
-                "phone_submitted": True,
-                "platform_transition": "web_to_whatsapp"
-            })
-            await save_user_session(session_id, session_data)
-            
-            # Import here to avoid circular imports
-            from app.services.baileys_service import baileys_service
-            
-            # Format phone number for WhatsApp
             # Clean and format phone number
             phone_clean = ''.join(filter(str.isdigit, phone_number))
             
-            # Add country code if missing
+            # Add country code if missing (Brazilian format)
             if len(phone_clean) == 10:
-                # Add 9 for mobile numbers without it (Brazilian format)
                 phone_formatted = f"55{phone_clean[:2]}9{phone_clean[2:]}"
             elif len(phone_clean) == 11:
                 phone_formatted = f"55{phone_clean}"
             else:
                 phone_formatted = phone_clean
             
-            # Add WhatsApp suffix
-            whatsapp_number = f"{phone_formatted}@s.whatsapp.net"
+            # Update session
+            session_data.update({
+                "phone_number": phone_clean,
+                "phone_formatted": phone_formatted,
+                "phone_submitted": True,
+                "platform_transition": "web_to_whatsapp"
+            })
+            await save_user_session(session_id, session_data)
             
-            # Prepare initial WhatsApp message
-            user_name = session_data.get("responses", {}).get("name", "Cliente")
-            responses = session_data.get("responses", {})
+            # Prepare WhatsApp message
+            lead_data = session_data.get("lead_data", {})
+            user_name = lead_data.get("name", "Cliente")
             
-            initial_message = f"""Olá {user_name}! 👋
+            whatsapp_message = f"""Olá {user_name}! 👋
 
-Recebemos sua solicitação através do nosso site e estamos aqui para ajudá-lo com questões jurídicas.
+Recebemos sua solicitação através do nosso site e estou aqui para ajudá-lo com questões jurídicas.
 
-📋 *Resumo das suas informações:*
-• Nome: {responses.get("name", "Não informado")}
-• Área jurídica: {responses.get("area_of_law", "Não especificada")}
-• Situação: {responses.get("situation", "Não informada")[:100]}{"..." if len(responses.get("situation", "")) > 100 else ""}
-
-Nossa equipe jurídica especializada está pronta para analisar seu caso. Vamos continuar nossa conversa aqui no WhatsApp para maior comodidade.
+Nossa equipe especializada está pronta para analisar seu caso. Vamos continuar nossa conversa aqui no WhatsApp para maior comodidade.
 
 Como posso ajudá-lo hoje? 🤝"""
             
             # Send WhatsApp message
             whatsapp_success = False
             try:
+                whatsapp_number = f"{phone_formatted}@s.whatsapp.net"
                 whatsapp_success = await baileys_service.send_whatsapp_message(
                     whatsapp_number, 
-                    initial_message
+                    whatsapp_message
                 )
-                logger.info(f"📱 WhatsApp message sent to {whatsapp_number}: {whatsapp_success}")
-            except Exception as whatsapp_error:
-                logger.error(f"❌ Failed to send WhatsApp message: {str(whatsapp_error)}")
+                logger.info(f"📱 WhatsApp message sent: {whatsapp_success}")
+            except Exception as e:
+                logger.error(f"❌ Failed to send WhatsApp: {str(e)}")
             
             return {
                 "response_type": "phone_submitted",
                 "session_id": session_id,
-                "phone_number": phone_number,
-                "phone_formatted": phone_formatted,
+                "phone_number": phone_clean,
                 "whatsapp_sent": whatsapp_success,
-                "message": f"✅ Perfeito! {'Enviamos uma mensagem para seu WhatsApp ' + phone_clean + '. Continue a conversa por lá!' if whatsapp_success else 'Registramos seu número ' + phone_clean + '. Nossa equipe entrará em contato em breve.'}"
+                "message": f"✅ Perfeito! {'Enviamos uma mensagem para seu WhatsApp. Continue a conversa por lá!' if whatsapp_success else 'Registramos seu número. Nossa equipe entrará em contato em breve.'}"
             }
             
         except Exception as e:
-            logger.error(f"❌ Error handling phone number submission: {str(e)}")
+            logger.error(f"❌ Error handling phone submission: {str(e)}")
             return {
                 "response_type": "error",
                 "session_id": session_id,
@@ -259,35 +324,28 @@ Como posso ajudá-lo hoje? 🤝"""
             }
     
     async def get_session_context(self, session_id: str) -> Dict[str, Any]:
-        """
-        Get comprehensive session context for debugging/admin purposes.
-        
-        Args:
-            session_id (str): Session identifier
-            
-        Returns:
-            Dict[str, Any]: Session context information
-        """
+        """Get comprehensive session context."""
         try:
-            # Get Firebase session data
             session_data = await get_user_session(session_id) or {}
-            
-            # Get AI conversation summary
             ai_summary = ai_orchestrator.get_conversation_summary(session_id)
             
             return {
                 "session_id": session_id,
-                "firebase_session": session_data,
+                "session_data": session_data,
                 "ai_conversation": ai_summary,
-                "flow_completed": session_data.get("flow_completed", False),
-                "ai_mode": session_data.get("ai_mode", False),
-                "phone_collected": session_data.get("phone_collected", False),
-                "platform": session_data.get("platform", "unknown")
+                "lead_data": session_data.get("lead_data", {}),
+                "lead_saved": session_data.get("lead_saved", False),
+                "platform": session_data.get("platform", "unknown"),
+                "message_count": session_data.get("message_count", 0)
             }
             
         except Exception as e:
             logger.error(f"❌ Error getting session context: {str(e)}")
             return {"error": str(e)}
 
-# Global hybrid orchestrator instance
-hybrid_orchestrator = HybridOrchestrator()
+
+# Global intelligent orchestrator instance
+intelligent_orchestrator = IntelligentOrchestrator()
+
+# Alias for backward compatibility
+hybrid_orchestrator = intelligent_orchestrator

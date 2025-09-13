@@ -6,12 +6,11 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
-// Configuração
+// Configuration
 const CONFIG = {
     phoneNumber: '+5511918368812',
     whatsappWebVersion: [2, 3000, 1026946712],
     sessionPath: './whatsapp_session',
-    pendingMessageFile: 'pending_message.json',
     expressPort: process.env.PORT || 3000
 };
 
@@ -88,9 +87,6 @@ class BaileysWhatsAppBot {
             }
         });
 
-        // 👉 Servir frontend (chat demo)
-        app.use('/chat-demo', express.static(path.join(__dirname, 'frontend')));
-
         // API endpoint for QR status
         app.get('/api/qr-status', (req, res) => {
             res.json({
@@ -135,7 +131,6 @@ class BaileysWhatsAppBot {
         app.listen(CONFIG.expressPort, '0.0.0.0', () => {
             console.log(`🌐 Express server running on http://localhost:${CONFIG.expressPort}`);
             console.log(`📱 QR Code page: http://localhost:${CONFIG.expressPort}/qr`);
-            console.log(`💬 Chat demo: http://localhost:${CONFIG.expressPort}/chat-demo/index.html`);
             console.log(`🔍 Health check: http://localhost:${CONFIG.expressPort}/health`);
         });
     }
@@ -156,7 +151,6 @@ class BaileysWhatsAppBot {
             this.saveCreds = saveCreds;
 
             await this.connectToWhatsApp();
-            this.startMessageProcessor();
         } catch (error) {
             console.error('❌ Error initializing WhatsApp bot:', error);
             process.exit(1);
@@ -233,14 +227,17 @@ class BaileysWhatsAppBot {
 
         this.sock.ev.on('creds.update', this.saveCreds);
 
+        // Message handler - simplified to just forward to backend
         this.sock.ev.on('messages.upsert', async (m) => {
             try {
                 const msg = m.messages[0];
                 if (!msg.key.fromMe && m.type === 'notify') {
                     const messageText = msg.message?.conversation || msg.message?.extendedTextMessage?.text || null;
                     if (messageText) {
-                        console.log('📨 New message from', msg.key.remoteJid, ':', messageText);
-                        await this.forwardToWebhook(msg.key.remoteJid, messageText, msg.key.id);
+                        console.log('📨 New message from', msg.key.remoteJid, ':', messageText.substring(0, 50) + '...');
+                        
+                        // Simply forward ALL messages to backend - no rigid logic here
+                        await this.forwardToBackend(msg.key.remoteJid, messageText, msg.key.id);
                     }
                 }
             } catch (error) {
@@ -249,33 +246,63 @@ class BaileysWhatsAppBot {
         });
     }
 
-    async forwardToWebhook(from, message, messageId) {
+    async forwardToBackend(from, message, messageId) {
         try {
             const webhookUrl = process.env.FASTAPI_WEBHOOK_URL || 'http://law_firm_backend:8000/api/v1/whatsapp/webhook';
-            const payload = { from, message, messageId, timestamp: new Date().toISOString(), platform: 'whatsapp' };
+            
+            // Create session ID from phone number
+            const sessionId = `whatsapp_${from.replace('@s.whatsapp.net', '')}`;
+            
+            const payload = { 
+                from, 
+                message, 
+                messageId, 
+                sessionId,
+                timestamp: new Date().toISOString(), 
+                platform: 'whatsapp' 
+            };
 
-            console.log('🔄 Forwarding message to FastAPI webhook:', webhookUrl);
-            console.log('📨 Message preview:', message.substring(0, 50) + (message.length > 50 ? '...' : ''));
+            console.log('🔄 Forwarding to backend:', message.substring(0, 50) + '...');
             
             // Use node-fetch or built-in fetch (Node 18+)
             const fetch = globalThis.fetch || require('node-fetch');
             const response = await fetch(webhookUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
+                body: JSON.stringify(payload),
+                timeout: 30000
             });
             
             if (response.ok) {
-                console.log('✅ Message forwarded to FastAPI successfully');
                 const responseData = await response.json();
-                console.log('📋 FastAPI response type:', responseData.response_type || 'unknown');
+                console.log('✅ Message forwarded successfully');
+                
+                // Send backend's AI response back to user
+                if (responseData.response) {
+                    await this.sendMessage(from, responseData.response);
+                    console.log('📤 AI response sent to user');
+                }
             } else {
-                console.error('❌ Failed to forward message to FastAPI:', response.status);
+                console.error('❌ Backend returned error:', response.status);
                 const errorText = await response.text();
                 console.error('Error details:', errorText);
+                
+                // Send fallback message to user
+                await this.sendMessage(from, 
+                    "Desculpe, estou enfrentando dificuldades técnicas. Nossa equipe foi notificada e entrará em contato em breve."
+                );
             }
         } catch (error) {
-            console.error('❌ Error forwarding message to webhook:', error);
+            console.error('❌ Error forwarding to backend:', error);
+            
+            // Send fallback message to user
+            try {
+                await this.sendMessage(from, 
+                    "Desculpe, estou enfrentando dificuldades técnicas. Nossa equipe foi notificada e entrará em contato em breve."
+                );
+            } catch (sendError) {
+                console.error('❌ Failed to send fallback message:', sendError);
+            }
         }
     }
 
@@ -290,25 +317,6 @@ class BaileysWhatsAppBot {
             console.error('❌ Error sending message:', error);
             throw error;
         }
-    }
-
-    startMessageProcessor() {
-        console.log('🔄 Starting message processor...');
-        setInterval(async () => {
-            try {
-                if (fs.existsSync(CONFIG.pendingMessageFile)) {
-                    const data = JSON.parse(fs.readFileSync(CONFIG.pendingMessageFile, 'utf8'));
-                    if (data.action === 'send_message' && data.to && data.message) {
-                        console.log('📤 Processing pending message from file...');
-                        await this.sendMessage(data.to, data.message);
-                        fs.unlinkSync(CONFIG.pendingMessageFile);
-                        console.log('✅ Processed and removed pending message file');
-                    }
-                }
-            } catch (error) {
-                if (error.code !== 'ENOENT') console.error('❌ Error processing pending message:', error);
-            }
-        }, 2000);
     }
 }
 

@@ -29,4 +29,3 @@ python-multipart==0.0.6
 
 # Websockets (para comunicação com o bot do WhatsApp)
 websockets==11.0.3
-

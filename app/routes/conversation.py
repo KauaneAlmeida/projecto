@@ -1,11 +1,8 @@
 """
 Conversation Flow Routes
 
-Handles the hybrid conversation flow for client intake:
-- Step-by-step guided questions (Firebase)
-- Fallback to AI-powered responses (LangChain + Gemini)
-- Phone number collection & WhatsApp trigger
-- Context preservation across web and WhatsApp
+Now handles intelligent conversation flow using AI orchestration instead of rigid Firebase flows.
+The AI manages the entire conversation naturally while still collecting lead information.
 """
 
 import uuid
@@ -16,7 +13,7 @@ from fastapi import APIRouter, HTTPException, status
 
 from app.models.request import ConversationRequest
 from app.models.response import ConversationResponse
-from app.services.orchestration_service import hybrid_orchestrator
+from app.services.orchestration_service import intelligent_orchestrator
 from app.services.firebase_service import get_firebase_service_status
 
 # Logging
@@ -29,15 +26,27 @@ router = APIRouter()
 @router.post("/conversation/start", response_model=ConversationResponse)
 async def start_conversation():
     """
-    Start a new conversation session.
-    Initializes with hybrid orchestration (Firebase + AI).
+    Start a new intelligent conversation session.
+    Uses AI orchestration instead of rigid Firebase flows.
     """
     try:
         session_id = str(uuid.uuid4())
-        logger.info(f"🚀 Starting new conversation | session={session_id}")
+        logger.info(f"🚀 Starting new intelligent conversation | session={session_id}")
 
-        result = await hybrid_orchestrator.process_message("", session_id, platform="web")
-        return ConversationResponse(**result)
+        # Start with a welcome message via AI
+        result = await intelligent_orchestrator.process_message(
+            "Olá", 
+            session_id, 
+            platform="web"
+        )
+        
+        return ConversationResponse(
+            session_id=session_id,
+            response=result.get("response", "Olá! Como posso ajudá-lo hoje?"),
+            ai_mode=True,
+            flow_completed=False,
+            phone_collected=False
+        )
 
     except Exception as e:
         logger.error(f"❌ Error starting conversation: {str(e)}")
@@ -50,26 +59,37 @@ async def start_conversation():
 @router.post("/conversation/respond", response_model=ConversationResponse)
 async def respond_to_conversation(request: ConversationRequest):
     """
-    Process user response with hybrid orchestration.
-
-    Flow:
-    1. Continue Firebase guided flow if active
-    2. Use AI fallback via LangChain + Gemini
-    3. Handle phone collection & WhatsApp trigger
+    Process user response with intelligent AI orchestration.
+    
+    The AI handles everything:
+    - Natural conversation flow
+    - Lead information collection
+    - Context awareness
+    - Flexible response handling
     """
     try:
         if not request.session_id:
             request.session_id = str(uuid.uuid4())
             logger.info(f"🆕 New session generated: {request.session_id}")
 
-        logger.info(f"📝 Processing response | session={request.session_id} | msg={request.message[:50]}...")
+        logger.info(f"📝 Processing intelligent response | session={request.session_id} | msg={request.message[:50]}...")
 
-        result = await hybrid_orchestrator.process_message(
+        # Process via Intelligent Orchestrator
+        result = await intelligent_orchestrator.process_message(
             request.message,
             request.session_id,
             platform="web"
         )
-        return ConversationResponse(**result)
+        
+        return ConversationResponse(
+            session_id=request.session_id,
+            response=result.get("response", "Como posso ajudá-lo?"),
+            ai_mode=True,
+            flow_completed=True,  # AI manages flow dynamically
+            phone_collected=False,  # Will be handled when needed
+            lead_data=result.get("lead_data", {}),
+            message_count=result.get("message_count", 1)
+        )
 
     except Exception as e:
         logger.error(f"❌ Error processing response: {str(e)}")
@@ -96,7 +116,7 @@ async def submit_phone_number(request: dict):
         
         logger.info(f"📱 Phone submitted | session={session_id} | number={phone_number}")
 
-        result = await hybrid_orchestrator.handle_phone_number_submission(phone_number, session_id)
+        result = await intelligent_orchestrator.handle_phone_number_submission(phone_number, session_id)
         return result
 
     except Exception as e:
@@ -114,7 +134,7 @@ async def get_conversation_status(session_id: str):
     """
     try:
         logger.info(f"📊 Fetching status | session={session_id}")
-        status_info = await hybrid_orchestrator.get_session_context(session_id)
+        status_info = await intelligent_orchestrator.get_session_context(session_id)
         return status_info
 
     except Exception as e:
@@ -142,7 +162,9 @@ async def get_ai_config():
             "current_system_prompt": ai_orchestrator.get_system_prompt(),
             "full_config": config,
             "config_source": "ai_schema.json" if config else "default",
-            "editable_location": "ai_schema.json in project root"
+            "editable_location": "ai_schema.json in project root or AI_SYSTEM_PROMPT in .env",
+            "environment_prompt": bool(os.getenv("AI_SYSTEM_PROMPT")),
+            "api_key_configured": bool(os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"))
         }
 
     except Exception as e:
@@ -153,84 +175,88 @@ async def get_ai_config():
 @router.get("/conversation/flow")
 async def get_conversation_flow():
     """
-    Get current Firebase conversation flow config.
-    Lawyers can edit it directly in Firebase Console.
+    Get current conversation approach info.
+    Now shows AI-powered approach instead of rigid Firebase flows.
     """
     try:
-        from app.services.conversation_service import conversation_manager
-
-        flow = await conversation_manager.get_flow()
         return {
-            "flow": flow,
-            "total_steps": len(flow.get("steps", [])),
-            "editable_in": "Firebase Console > conversation_flows > law_firm_intake",
-            "note": "Lawyers can update questions without code changes",
+            "approach": "ai_intelligent_orchestration",
+            "description": "Conversation managed by AI (LangChain + Gemini) instead of rigid flows",
             "features": [
-                "Firebase-guided sequence",
-                "Hybrid orchestration with AI fallback",
-                "LangChain + Gemini integration",
-                "Phone collection",
-                "WhatsApp trigger",
-                "Cross-platform context"
-            ]
+                "Natural language processing",
+                "Context-aware responses", 
+                "Flexible lead collection",
+                "Conversation memory",
+                "Brazilian Portuguese responses",
+                "Empathetic and professional tone",
+                "Automatic information extraction",
+                "Smart phone collection"
+            ],
+            "lead_collection": {
+                "method": "natural_extraction",
+                "fields": ["name", "area_of_law", "situation", "consent"],
+                "approach": "AI extracts information naturally from conversation"
+            },
+            "configuration": {
+                "system_prompt": "Configurable via AI_SYSTEM_PROMPT in .env or ai_schema.json",
+                "ai_model": "gemini-1.5-flash",
+                "memory_window": "10 messages per session",
+                "response_style": "Professional, empathetic, Brazilian Portuguese"
+            }
         }
 
     except Exception as e:
-        logger.error(f"❌ Error retrieving conversation flow: {str(e)}")
+        logger.error(f"❌ Error retrieving conversation flow info: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve conversation flow"
+            detail="Failed to retrieve conversation flow information"
         )
 
 
 @router.get("/conversation/service-status")
 async def conversation_service_status():
     """
-    Check overall service health: Firebase + AI + flow accessibility.
+    Check overall service health: Firebase + AI + intelligent orchestration.
     """
     try:
-        # Firebase
+        # Firebase status
         firebase_status = await get_firebase_service_status()
 
-        # Flow check
-        try:
-            from app.services.conversation_service import conversation_manager
-            flow = await conversation_manager.get_flow()
-            flow_accessible = True
-            total_steps = len(flow.get("steps", []))
-        except Exception as e:
-            flow_accessible = False
-            total_steps = 0
-            logger.error(f"❌ Flow access test failed: {str(e)}")
-
-        # AI service
+        # AI service status
         try:
             from app.services.ai_chain import get_ai_service_status
             ai_status = await get_ai_service_status()
         except Exception as e:
             ai_status = {"status": "error", "error": str(e)}
 
+        # Overall status
+        overall_status = (
+            "active" if firebase_status["status"] == "active" 
+            and ai_status["status"] == "active" 
+            else "degraded"
+        )
+
         return {
-            "service": "hybrid_orchestration_service",
-            "status": (
-                "active" if firebase_status["status"] == "active"
-                and flow_accessible
-                and ai_status["status"] == "active" else "degraded"
-            ),
+            "service": "intelligent_conversation_service",
+            "status": overall_status,
+            "approach": "ai_powered_orchestration",
             "firebase_status": firebase_status,
             "ai_status": ai_status,
-            "conversation_flow": {
-                "accessible": flow_accessible,
-                "total_steps": total_steps,
-                "editable_location": "Firebase Console > conversation_flows > law_firm_intake"
+            "features": {
+                "intelligent_responses": ai_status["status"] == "active",
+                "lead_collection": True,
+                "conversation_memory": True,
+                "context_awareness": True,
+                "flexible_dialogue": True,
+                "whatsapp_integration": True
             },
             "endpoints": {
                 "start": "/api/v1/conversation/start",
                 "respond": "/api/v1/conversation/respond",
                 "submit_phone": "/api/v1/conversation/submit-phone",
                 "status": "/api/v1/conversation/status/{session_id}",
-                "flow": "/api/v1/conversation/flow",
-                "ai_config": "/api/v1/conversation/ai-config"
+                "ai_config": "/api/v1/conversation/ai-config",
+                "flow_info": "/api/v1/conversation/flow"
             }
         }
 

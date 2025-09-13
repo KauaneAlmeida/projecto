@@ -7,11 +7,12 @@ LangChain + Gemini definida em `ai_chain.py`.
 """
 
 import logging
+from typing import Dict, Any, Optional
 from app.services.ai_chain import (
     process_chat_message,
-    process_with_langchain,
     clear_conversation_memory,
     get_conversation_summary,
+    get_ai_service_status,
     ai_orchestrator,
 )
 
@@ -19,60 +20,40 @@ from app.services.ai_chain import (
 logger = logging.getLogger(__name__)
 
 
-# -----------------------------
-# Funções principais de serviço
-# -----------------------------
-
+# Main service functions
 async def process_chat_message_service(
-    message: str, session_id: str = "default"
+    message: str, 
+    session_id: str = "default",
+    context: Optional[Dict[str, Any]] = None
 ) -> str:
     """
-    Processa a mensagem do usuário usando LangChain + Gemini.
+    Process user message using LangChain + Gemini with context support.
     """
     try:
-        logger.info(f"📨 Processando mensagem: {message[:50]}... (sessão={session_id})")
+        logger.info(f"📨 Processing message: {message[:50]}... (session={session_id})")
 
-        # Sempre processa via LangChain
-        response = await process_with_langchain(message, session_id=session_id)
+        # Process via LangChain with context
+        response = await process_chat_message(message, session_id=session_id, context=context)
 
-        logger.info(f"✅ Resposta gerada: {response[:50]}...")
+        logger.info(f"✅ Response generated: {response[:50]}...")
         return response
 
     except Exception as e:
-        logger.error(f"❌ Erro no processamento da mensagem: {str(e)}")
+        logger.error(f"❌ Error processing message: {str(e)}")
         return (
             "Desculpe, ocorreu um erro ao processar sua mensagem. "
             "Por favor, tente novamente mais tarde."
         )
 
 
-async def get_ai_service_status() -> dict:
+async def get_ai_service_status_service() -> Dict[str, Any]:
     """
-    Retorna o status atual do serviço de IA.
+    Get current AI service status.
     """
     try:
-        # Testa rapidamente se a IA responde
-        test_response = await process_with_langchain("teste", session_id="__status__")
-        ai_orchestrator.clear_session_memory("__status__")
-
-        return {
-            "service": "ai_service",
-            "status": "active",
-            "message": "LangChain + Gemini está operacional",
-            "test_response": test_response[:50],
-            "system_prompt_configured": bool(ai_orchestrator.system_prompt),
-            "active_sessions": len(ai_orchestrator.get_conversation_summary("default")),
-            "features": [
-                "langchain_integration",
-                "gemini_api",
-                "conversation_memory",
-                "session_management",
-                "brazilian_portuguese_responses",
-            ],
-        }
-
+        return await get_ai_service_status()
     except Exception as e:
-        logger.error(f"❌ Erro ao verificar status da IA: {str(e)}")
+        logger.error(f"❌ Error getting AI service status: {str(e)}")
         return {
             "service": "ai_service",
             "status": "error",
@@ -81,16 +62,11 @@ async def get_ai_service_status() -> dict:
         }
 
 
-# -----------------------------
-# Aliases para compatibilidade
-# -----------------------------
-
-# Alias para manter compatibilidade com `chat.py`
+# Aliases for compatibility
 process_chat_message = process_chat_message_service
-
-# Processamento de mensagens (compatível com versões antigas)
 process_ai_message = process_chat_message_service
+get_ai_service_status = get_ai_service_status_service
 
-# Memória da conversa
+# Memory management
 clear_memory = clear_conversation_memory
 get_summary = get_conversation_summary

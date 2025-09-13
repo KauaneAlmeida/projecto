@@ -1,20 +1,16 @@
 """
 WhatsApp Routes
 
-Handles WhatsApp webhook events and integrates with Baileys.
-Supports:
-- Receiving messages via webhook
-- Processing through Hybrid Orchestrator (Firebase + AI)
-- Sending messages via Baileys
-- Service management (start, status)
-- Suggesting WhatsApp contact after intake completion
+Handles WhatsApp webhook events and integrates with Intelligent Orchestrator.
+The WhatsApp bot now acts as a simple transport layer, forwarding all messages
+to the backend AI for intelligent processing.
 """
 
 import logging
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request, status
 
-from app.services.orchestration_service import hybrid_orchestrator
+from app.services.orchestration_service import intelligent_orchestrator
 from app.services.baileys_service import (
     send_baileys_message,
     get_baileys_status,
@@ -32,7 +28,7 @@ router = APIRouter()
 async def whatsapp_webhook(request: Request):
     """
     Webhook endpoint for receiving WhatsApp messages via Baileys.
-    Processes through Hybrid Orchestrator (Firebase flow + AI).
+    Now processes ALL messages through Intelligent Orchestrator (AI-powered).
     """
     try:
         payload = await request.json()
@@ -42,45 +38,57 @@ async def whatsapp_webhook(request: Request):
         message_text = payload.get("message", "")
         phone_number = payload.get("from", "")
         message_id = payload.get("messageId", "")
+        session_id = payload.get("sessionId", f"whatsapp_{phone_number.replace('@s.whatsapp.net', '')}")
 
         if not message_text or not phone_number:
             logger.warning("⚠️ Invalid webhook payload - missing message or phone number")
             return {"status": "error", "message": "Invalid payload"}
 
-        # Use phone as session ID
-        session_id = f"whatsapp_{phone_number.replace('@s.whatsapp.net', '')}"
+        logger.info(f"🎯 Processing WhatsApp message from {phone_number}: {message_text[:50]}...")
 
-        # Process via orchestrator
-        response = await hybrid_orchestrator.process_message(
+        # Process via Intelligent Orchestrator (AI-powered)
+        response = await intelligent_orchestrator.process_message(
             message_text,
             session_id,
             phone_number=phone_number,
             platform="whatsapp"
         )
 
-        # Send reply
-        if response.get("response") or response.get("question"):
-            reply_text = response.get("response") or response.get("question")
+        # The response will always contain an AI-generated reply
+        ai_response = response.get("response", "")
+        
+        if ai_response:
+            logger.info(f"🤖 Sending AI response to {phone_number}")
+            logger.debug(f"AI Response: {ai_response[:100]}...")
             
-            # Log the response type and content for debugging
-            logger.info(f"📤 Sending {response.get('response_type', 'unknown')} response to {phone_number}")
-            logger.debug(f"Response content: {reply_text[:100]}...")
-            
-            await send_baileys_message(phone_number, reply_text)
-            logger.info(f"✅ Sent WhatsApp reply to {phone_number}")
-
-        return {
-            "status": "success",
-            "message_id": message_id,
-            "session_id": session_id,
-            "response_type": response.get("response_type", "unknown"),
-            "ai_mode": response.get("ai_mode", False),
-            "flow_completed": response.get("flow_completed", False)
-        }
+            # Response is sent by the WhatsApp bot automatically
+            # We just return the response data for the bot to handle
+            return {
+                "status": "success",
+                "message_id": message_id,
+                "session_id": session_id,
+                "response": ai_response,
+                "response_type": response.get("response_type", "ai_intelligent"),
+                "lead_data": response.get("lead_data", {}),
+                "message_count": response.get("message_count", 1)
+            }
+        else:
+            logger.warning("⚠️ No AI response generated")
+            return {
+                "status": "success",
+                "message_id": message_id,
+                "session_id": session_id,
+                "response": "Obrigado pela sua mensagem. Nossa equipe entrará em contato em breve.",
+                "response_type": "fallback"
+            }
 
     except Exception as e:
         logger.error(f"❌ Error processing WhatsApp webhook: {str(e)}")
-        return {"status": "error", "message": str(e)}
+        return {
+            "status": "error", 
+            "message": str(e),
+            "response": "Desculpe, ocorreu um erro interno. Nossa equipe foi notificada e entrará em contato em breve."
+        }
 
 
 @router.post("/whatsapp/send")
@@ -169,18 +177,19 @@ async def suggest_whatsapp_contact(session_id: str, user_name: str = "Cliente"):
 
         # Message to law firm
         notification_message = f"""
-🔔 *Nova Lead do Chatbot*
+🔔 *Nova Lead do Chatbot AI*
 
 👤 *Cliente:* {user_name}
 🆔 *Sessão:* {session_id}
 ⏰ *Horário:* {datetime.now().strftime('%d/%m/%Y às %H:%M')}
+🤖 *Origem:* Conversa inteligente com IA
 
-O cliente completou o questionário inicial e está interessado em nossos serviços jurídicos.
+O cliente interagiu com nosso assistente AI e demonstrou interesse em nossos serviços jurídicos.
 
 _Mensagem enviada automaticamente pelo sistema._
         """.strip()
 
-        # TODO: Parametrizar número do escritório em settings
+        # Send to law firm number
         success = await send_baileys_message("+5511918368812", notification_message)
 
         return {
